@@ -1,1 +1,148 @@
 # DAILY_TIPS_AI_MAILING
+
+# AI 콘텐츠 구독 서비스
+
+> 백엔드 채용 과제 / 2일 구현 범위 / 주니어 백엔드 관점
+> 본 문서는 "완성도"보다 **문제 구조화와 데이터 설계 사고 과정**을 보여주는 것을 목표로 한다.
+
+---
+
+## 1. 개요
+
+AI 관련 소식, 활용법, 기능 소개 콘텐츠를 정기적으로 발행하고, 구독자에게 발송하는 **하이브리드(웹 + 뉴스레터) 구독 서비스**의 백엔드 MVP.
+
+- **메인 흐름**: 회원이 구독하면 -> 프리미엄 콘텐츠 열람 권한을 얻고 -> 관리자가 발행한 뉴스레터를 받아본다.
+- **핵심 가치 검증 포인트**: "구독 상태"와 "콘텐츠 접근 권한"이 맞물리는 단일 비즈니스 규칙.
+
+## 2. 목표 / 비목표
+
+### 목표 (Goals)
+- 회원 가입·인증과 역할(member/admin) 분리
+- 관리자의 콘텐츠 발행 및 무료/프리미엄 구분
+- 구독 신청·상태 관리와 **프리미엄 게이팅**(활성 구독자만 프리미엄 열람)
+- 뉴스레터 발송(구독자 fan-out)과 사용자별 발송 이력 추적
+- OpenAPI(Swagger) 기반 API 문서 제공
+
+### 비목표 (Non-Goals)
+> 시간 제약 하에 **의도적으로 스텁/제외**한다. (README에 사유 명시)
+- 실제 PG 결제 연동 → 결제는 상태 기록만 하는 **Mock**
+- 실제 이메일 SMTP 발송 → 발송 로그 적재로 **대체**
+- 프론트엔드 UI → Swagger로 대체
+- 소셜 로그인, 비밀번호 재설정 메일, 댓글·북마크, 전문(全文) 검색
+
+## 3. 사용자 / 역할
+
+| 역할 | 설명 | 주요 행위 |
+|------|------|-----------|
+| `member` | 일반 회원/구독자 | 가입·로그인, 구독 신청/취소, 콘텐츠 열람, 뉴스레터 수신 |
+| `admin` | 운영자 | 콘텐츠 CRUD·발행, 뉴스레터 이슈 생성·발송, 발송 이력 조회 |
+
+---
+
+## 4. 기능 요구사항
+
+### F1. 회원 (Auth)
+- **F1-1** 이메일 + 비밀번호로 회원가입한다. 비밀번호는 해싱하여 저장한다.
+- **F1-2** 로그인 시 JWT 액세스 토큰을 발급한다.
+- **F1-3** 모든 보호된 API는 토큰의 `role`로 member/admin 권한을 검사한다.
+- **F1-4** 내 정보(프로필 + 현재 구독 상태)를 조회한다.
+- **수용 기준**: 중복 이메일 가입 거부 / 잘못된 자격증명 로그인 거부 / member 토큰으로 admin API 호출 시 403.
+
+### F2. 콘텐츠 관리 (Content)
+- **F2-1** admin은 콘텐츠를 생성·수정·삭제한다.
+- **F2-2** 콘텐츠 속성: 제목, 본문, 카테고리, `content_type`(news/tutorial/feature), `is_premium`(무료/프리미엄), `status`(draft/published).
+- **F2-3** admin은 콘텐츠를 발행(`published`)한다. 발행된 콘텐츠만 회원에게 노출된다.
+- **F2-4** 콘텐츠 목록(카테고리·타입 필터)과 상세를 조회한다.
+- **수용 기준**: `draft` 콘텐츠는 일반 회원 조회 결과에서 제외 / 비admin의 생성·수정·삭제 거부.
+
+### F3. 구독 상태 관리 (Subscription)
+- **F3-1** 활성화된 플랜 목록을 조회한다. (예: Free, Pro)
+- **F3-2** member는 플랜을 선택해 구독을 신청한다. → `subscriptions` 레코드 생성(`status=active`, `start_at`, `end_at` 설정), 결제는 Mock으로 `payments`에 기록.
+- **F3-3** member는 구독을 취소한다. → `status=canceled`.
+- **F3-4** 현재 사용자의 **유효 구독 여부**를 판단한다.
+  - 판정식: `status='active' AND end_at > now()`
+- **수용 기준**: 만료(`end_at` 경과) 구독은 유효하지 않은 것으로 처리 / 중복 active 구독 방지.
+
+### F4. 핵심 규칙 — 프리미엄 게이팅 ⭐
+> 본 서비스에서 가장 중요한 비즈니스 로직. 콘텐츠 도메인과 구독 도메인이 교차하는 지점.
+
+- **F4-1** `is_premium=false` 콘텐츠 본문은 누구나(비로그인 포함 정책 선택) 열람한다.
+- **F4-2** `is_premium=true` 콘텐츠 본문은 **유효 구독자만** 열람한다.
+- **F4-3** 권한이 없는 사용자가 프리미엄 본문 요청 시, 본문 대신 미리보기/안내(402 또는 403)를 반환한다.
+- **수용 기준**: 구독 만료 직후 프리미엄 본문 접근 차단이 즉시 반영된다.
+
+### F5. 발송 (Delivery)
+- **F5-1** admin은 뉴스레터 이슈를 생성한다. (제목 + 소개글, 선택적으로 콘텐츠 N건 큐레이션)
+- **F5-2** admin이 이슈를 발송하면, **대상 수신자에게 fan-out**하여 각 수신자별 발송 레코드를 생성한다.
+  - 수신 대상 정책(택1, 문서에 명시): `전체 회원` 또는 `활성 구독자만`
+- **F5-3** 실제 메일 전송은 Mock(로그 적재)으로 대체하되, 인터페이스는 교체 가능하게 분리한다.
+- **수용 기준**: 이슈 1건 발송 시 수신자 수만큼 `newsletter_deliveries` 레코드가 생성된다.
+
+### F6. 발송 이력 추적 (Delivery History)
+- **F6-1** 발송 시점에 사용자별 발송 로그(`status=sent`, `sent_at`)를 남긴다.
+- **F6-2** 오픈 트래킹 엔드포인트(예: `GET /track/open?...`)로 `status=opened`, `opened_at`을 기록한다. (Mock 가능)
+- **F6-3** admin은 이슈별 발송 결과(발송 수, 오픈 수 등)와 사용자별 이력을 조회한다.
+- **수용 기준**: 동일 (이슈, 사용자) 발송이 중복 적재되지 않는다.
+
+---
+
+## 5. API 개요 (초안)
+
+| Method | Path | 권한 | 설명 |
+|--------|------|------|------|
+| POST | `/auth/signup` | public | 회원가입 |
+| POST | `/auth/login` | public | 로그인(JWT) |
+| GET | `/me` | member | 내 정보 + 구독 상태 |
+| GET | `/plans` | public | 플랜 목록 |
+| POST | `/subscriptions` | member | 구독 신청(결제 Mock) |
+| DELETE | `/subscriptions/{id}` | member | 구독 취소 |
+| GET | `/contents` | public | 발행 콘텐츠 목록(필터) |
+| GET | `/contents/{id}` | public/member | 콘텐츠 상세(프리미엄 게이팅 적용) |
+| POST | `/admin/contents` | admin | 콘텐츠 생성 |
+| PUT | `/admin/contents/{id}` | admin | 콘텐츠 수정 |
+| DELETE | `/admin/contents/{id}` | admin | 콘텐츠 삭제 |
+| POST | `/admin/newsletters` | admin | 뉴스레터 이슈 생성 |
+| POST | `/admin/newsletters/{id}/send` | admin | 발송(fan-out) |
+| GET | `/admin/newsletters/{id}/deliveries` | admin | 발송 이력 조회 |
+| GET | `/track/open` | public | 오픈 트래킹(Mock) |
+
+## 6. 데이터 모델 요약
+
+상세는 별도 ERD(`erd.mermaid`) 참조. 도메인별 핵심 엔티티:
+
+- **회원·구독**: `users`, `plans`, `subscriptions`, `payments`
+- **콘텐츠**: `contents`, `categories`, `tags`, `content_tags`
+- **발송**: `newsletter_issues`, `issue_contents`, `newsletter_deliveries`
+
+설계 의도(요약):
+- `subscriptions`를 별도 테이블로 분리해 **구독 이력**과 상태 전이를 관리(유효성은 `status`+`end_at`으로 단일 판정).
+- `contents.is_premium` 한 컬럼으로 게이팅 분기, 콘텐츠 성격은 `content_type` enum으로 표현.
+- `newsletter_deliveries`로 **사용자별 발송/오픈 로그**를 적재해 지표 확장 여지 확보.
+
+## 7. 비기능 요구사항 (Lean)
+
+- RESTful API + JWT 인증, 역할 기반 접근 제어(RBAC) 최소 구현
+- OpenAPI(Swagger) 문서 자동 생성
+- 환경변수로 설정 분리, Docker 기반 실행
+- 발송/결제는 **인터페이스로 추상화**하여 Mock ↔ 실제 구현 교체 가능하게 설계
+
+## 8. 구현 마일스톤 (2일)
+
+### Day 1
+- (오전) 문제 정의·범위 확정 / ERD 확정 / 스택 결정 / 프로젝트 스캐폴딩
+- (오후) DB 스키마·마이그레이션 / 인증(JWT) / `users`·`plans`·`contents` 기본 CRUD
+
+### Day 2
+- (오전) 구독 신청·취소·상태 로직 / **프리미엄 게이팅(F4)** / 뉴스레터 fan-out(F5)
+- (오후) 발송 이력·오픈 트래킹(F6) / Swagger·README / AI 협업 로그 / Docker·마무리
+
+### 우선순위 (시간 부족 시 절단선)
+1. **필수**: F1, F2, F3, F4 (게이팅까지가 서비스의 코어)
+2. **중요**: F5, F6
+3. **선택(절단 가능)**: `tags`/`content_tags`, `issue_contents` 큐레이션, 오픈 트래킹 정밀화
+
+## 9. 범위 외 / 가정
+
+- 결제·이메일은 Mock이며, 운영 수준 신뢰성(재시도·큐잉)은 범위 외.
+- 단일 인스턴스 가정, 대용량 발송 최적화·스케줄러는 범위 외(인터페이스만 확장 가능하게 남겨둠).
+- 보안은 기본 수준(해싱·JWT·권한 검사)까지, 토큰 리프레시·레이트리밋은 범위 외.
